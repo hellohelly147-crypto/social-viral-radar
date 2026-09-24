@@ -1,4 +1,4 @@
-import math, os
+import math, os, time
 from datetime import datetime, timezone, timedelta
 import pandas as pd
 import requests
@@ -67,13 +67,49 @@ def popular_search(token, query, limit):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def trending_search(token, terms, limit, days, min_plays):
-    url=f"{BASE}/{TREND_ACTOR}/run-sync-get-dataset-items"
+    # This Actor can take longer than a synchronous HTTP request. Start the run,
+    # poll its status, then fetch the default dataset when it succeeds.
     after=(datetime.now(timezone.utc)-timedelta(days=days)).date().isoformat()
     payload={"searchTerms":terms,"maxItems":int(limit),"includeTranscripts":False,"publishedAfter":after}
     if min_plays>0: payload["minPlays"]=int(min_plays)
-    r=requests.post(url,params={"token":token},json=payload,timeout=180)
-    if r.status_code>=400: raise RuntimeError(f"Trending search error {r.status_code}: {r.text[:450]}")
-    data=r.json(); return data if isinstance(data,list) else []
+
+    headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"}
+    start_url=f"{BASE}/{TREND_ACTOR}/runs"
+    r=requests.post(start_url,headers=headers,json=payload,timeout=30)
+    if r.status_code>=400:
+        raise RuntimeError(f"Trending run start error {r.status_code}: {r.text[:450]}")
+    body=r.json()
+    run=(body.get("data") or {}) if isinstance(body,dict) else {}
+    run_id=run.get("id")
+    if not run_id:
+        raise RuntimeError("Apify started no usable run ID for Trending Now.")
+
+    deadline=time.time()+420  # allow up to 7 minutes for the community Actor
+    terminal={"SUCCEEDED","FAILED","TIMED-OUT","ABORTED"}
+    status=run.get("status","READY")
+    status_message=run.get("statusMessage") or ""
+    while time.time()<deadline:
+        sr=requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}",headers={"Authorization":f"Bearer {token}"},params={"waitForFinish":20},timeout=30)
+        if sr.status_code>=400:
+            raise RuntimeError(f"Trending status error {sr.status_code}: {sr.text[:450]}")
+        info=(sr.json().get("data") or {})
+        status=info.get("status",status)
+        status_message=info.get("statusMessage") or status_message
+        if status in terminal:
+            run=info
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError(f"Trending run is still processing after 7 minutes (run {run_id}). Try again later; the existing Apify run may still finish.")
+
+    if status!="SUCCEEDED":
+        raise RuntimeError(f"Trending Actor ended with {status}: {status_message or 'No status message'}")
+
+    dr=requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",params={"clean":"true","limit":int(limit)},timeout=60)
+    if dr.status_code>=400:
+        raise RuntimeError(f"Trending dataset error {dr.status_code}: {dr.text[:450]}")
+    data=dr.json()
+    return data if isinstance(data,list) else []
 
 def normalize(items, source):
     rows=[]
@@ -166,7 +202,10 @@ with t_now:
                 st.session_state.trend_raw_count = len(raw)
                 st.session_state.trend=normalize(raw,"Trending Now")
                 st.session_state.trend_attempted=True
-        except Exception as e: st.error(str(e))
+        except Exception as e:
+            st.session_state.trend_attempted=False
+            st.session_state.trend=pd.DataFrame()
+            st.error(str(e))
     df=st.session_state.get("trend",pd.DataFrame())
     if not df.empty:
         a,b,c,d=st.columns(4); a.metric("Fresh Reels",len(df)); b.metric("Rising/Trending",int(df.signal.isin(["🚀 Rising","⚡ Trending"]).sum())); c.metric("Best Score",f"{df.score.max():.1f}"); d.metric("Top Views/hr",compact(df.velocity.max()))
@@ -198,4 +237,4 @@ with t_niche:
         st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
 
 st.divider()
-st.caption("V1.3.1 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.3.2 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
