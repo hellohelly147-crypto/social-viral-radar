@@ -105,9 +105,12 @@ def compact(v):
     if v>=1_000:return f"{v/1_000:.1f}K"
     return str(v)
 
-def render(df):
+def render(df, attempted=False):
     if df.empty:
-        st.info("No matching Reels returned. Try a broader keyword, a longer freshness window, or a lower minimum views threshold.")
+        if attempted:
+            st.info("No matching Reels returned. Try a broader keyword, a longer freshness window, or a lower minimum views threshold.")
+        else:
+            st.caption("Run a search to load live Reel data.")
         return
     out=df.copy(); out["Age"]=out.age_hours.map(lambda h:f"{h}h" if h<48 else f"{h/24:.0f}d")
     out["Views"]=out.views.map(compact); out["Likes"]=out.likes.map(compact); out["Comments"]=out.comments.map(compact)
@@ -120,7 +123,10 @@ with st.sidebar:
     st.header("Controls")
     limit=st.slider("Results",5,50,10,5)
     st.divider()
-    st.success("Apify API connected") if TOKEN else st.error("APIFY_API_TOKEN missing")
+    if TOKEN:
+        st.success("Apify API connected")
+    else:
+        st.error("APIFY_API_TOKEN missing")
     st.caption("Country is not claimed because these search surfaces do not provide a reliable country-only filter.")
     if st.button("Clear cached results"):
         st.cache_data.clear(); st.success("Cache cleared")
@@ -134,12 +140,17 @@ with t_pop:
     if st.button("Fetch popular Reels",type="primary",disabled=not TOKEN,key="pop_btn"):
         try:
             with st.spinner("Fetching popular Reels…"):
-                st.session_state.pop=normalize(popular_search(TOKEN,topic.lower(),limit),"Popular")
+                raw = popular_search(TOKEN,topic.lower(),limit)
+                st.session_state.pop_raw_count = len(raw)
+                st.session_state.pop=normalize(raw,"Popular")
+                st.session_state.pop_attempted=True
         except Exception as e: st.error(str(e))
     df=st.session_state.get("pop",pd.DataFrame())
     if not df.empty:
         a,b,c,d=st.columns(4); a.metric("Reels",len(df)); b.metric("Total Views",compact(df.views.sum())); c.metric("Best Score",f"{df.score.max():.1f}"); d.metric("Top Views/hr",compact(df.velocity.max()))
-    render(df)
+    render(df, st.session_state.get("pop_attempted", False))
+    if st.session_state.get("pop_attempted", False):
+        st.caption(f"API records received: {st.session_state.get('pop_raw_count', 0)}")
 
 with t_now:
     st.subheader("Trending Now")
@@ -151,12 +162,17 @@ with t_now:
     if st.button("Find fresh trending Reels",type="primary",disabled=(not TOKEN or not trend_q.strip()),key="trend_btn"):
         try:
             with st.spinner("Scanning fresh Reels…"):
-                st.session_state.trend=normalize(trending_search(TOKEN,[trend_q.strip()],limit,days,min_views),"Trending Now")
+                raw = trending_search(TOKEN,[trend_q.strip()],limit,days,min_views)
+                st.session_state.trend_raw_count = len(raw)
+                st.session_state.trend=normalize(raw,"Trending Now")
+                st.session_state.trend_attempted=True
         except Exception as e: st.error(str(e))
     df=st.session_state.get("trend",pd.DataFrame())
     if not df.empty:
         a,b,c,d=st.columns(4); a.metric("Fresh Reels",len(df)); b.metric("Rising/Trending",int(df.signal.isin(["🚀 Rising","⚡ Trending"]).sum())); c.metric("Best Score",f"{df.score.max():.1f}"); d.metric("Top Views/hr",compact(df.velocity.max()))
-    render(df)
+    render(df, st.session_state.get("trend_attempted", False))
+    if st.session_state.get("trend_attempted", False):
+        st.caption(f"API records received: {st.session_state.get('trend_raw_count', 0)}")
 
 with t_niche:
     st.subheader("Niche Explorer")
@@ -170,12 +186,16 @@ with t_niche:
             with st.spinner(f"Searching '{niche}'…"):
                 if mode=="Trending Now": raw=trending_search(TOKEN,[niche.strip()],limit,ndays,0); src="Trending Now"
                 else: raw=popular_search(TOKEN,niche.strip(),limit); src="Popular"
+                st.session_state.niche_raw_count = len(raw)
                 st.session_state.niche_df=normalize(raw,src)
+                st.session_state.niche_attempted=True
         except Exception as e: st.error(str(e))
     df=st.session_state.get("niche_df",pd.DataFrame())
     if not df.empty:
         a,b,c=st.columns(3); a.metric("Matching Reels",len(df)); b.metric("Total Views",compact(df.views.sum())); c.metric("Best Score",f"{df.score.max():.1f}")
-    render(df)
+    render(df, st.session_state.get("niche_attempted", False))
+    if st.session_state.get("niche_attempted", False):
+        st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
 
 st.divider()
-st.caption("V1.3 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.3.1 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
