@@ -105,7 +105,12 @@ def trending_search(token, terms, limit, days, min_plays):
     if status!="SUCCEEDED":
         raise RuntimeError(f"Trending Actor ended with {status}: {status_message or 'No status message'}")
 
-    dr=requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",params={"clean":"true","limit":int(limit)},timeout=60)
+    dr=requests.get(
+        f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",
+        headers={"Authorization":f"Bearer {token}"},
+        params={"clean":"true","limit":int(limit)},
+        timeout=60,
+    )
     if dr.status_code>=400:
         raise RuntimeError(f"Trending dataset error {dr.status_code}: {dr.text[:450]}")
     data=dr.json()
@@ -154,18 +159,104 @@ def render(df, attempted=False):
     st.dataframe(out[["signal","creator","caption","Age","Views","Likes","Comments","Views/hr","Engagement","Score","url"]],use_container_width=True,hide_index=True,
         column_config={"signal":"Signal","creator":"Creator","caption":"Content","url":st.column_config.LinkColumn("Instagram")})
 
-TOKEN=secret("APIFY_API_TOKEN")
+APP_TOKEN = secret("APIFY_API_TOKEN")
+
+def masked_token(token):
+    if not token:
+        return ""
+    if len(token) <= 8:
+        return "••••••••"
+    return f"{token[:4]}••••••••{token[-4:]}"
+
+def validate_apify_token(token):
+    """Lightweight authentication check; does not start an Actor run."""
+    try:
+        r = requests.get(
+            "https://api.apify.com/v2/users/me",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        if r.status_code == 200:
+            return True, ""
+        if r.status_code in (401, 403):
+            return False, "Apify rejected this API token."
+        return False, f"Apify connection check returned HTTP {r.status_code}."
+    except requests.RequestException as e:
+        return False, f"Could not reach Apify: {e}"
+
+# BYOK state is session-only. We never write the user's token to disk or GitHub.
+if "user_apify_token" not in st.session_state:
+    st.session_state.user_apify_token = ""
+if "user_token_validated" not in st.session_state:
+    st.session_state.user_token_validated = False
+
 with st.sidebar:
     st.header("Controls")
     limit=st.slider("Results",5,50,10,5)
+
     st.divider()
-    if TOKEN:
-        st.success("Apify API connected")
+    st.subheader("API Settings")
+
+    api_choices = ["Use my own Apify API"]
+    if APP_TOKEN:
+        api_choices.append("Use app API")
+
+    default_choice = "Use app API" if APP_TOKEN and not st.session_state.user_apify_token else "Use my own Apify API"
+    api_source = st.radio(
+        "API source",
+        api_choices,
+        index=api_choices.index(default_choice),
+        help="Your own token is kept only in this Streamlit session. The app API comes from Streamlit Secrets.",
+    )
+
+    if api_source == "Use my own Apify API":
+        entered_token = st.text_input(
+            "Apify API token",
+            type="password",
+            value=st.session_state.user_apify_token,
+            placeholder="apify_api_...",
+            help="The token is used for Apify requests in this session and is not written to GitHub or app files.",
+        ).strip()
+
+        if entered_token != st.session_state.user_apify_token:
+            st.session_state.user_apify_token = entered_token
+            st.session_state.user_token_validated = False
+
+        c_test, c_clear = st.columns(2)
+        if c_test.button("Test connection", use_container_width=True, disabled=not entered_token):
+            ok, msg = validate_apify_token(entered_token)
+            st.session_state.user_token_validated = ok
+            if ok:
+                st.success("Your Apify API connected")
+            else:
+                st.error(msg)
+
+        if c_clear.button("Clear key", use_container_width=True, disabled=not st.session_state.user_apify_token):
+            st.session_state.user_apify_token = ""
+            st.session_state.user_token_validated = False
+            st.cache_data.clear()
+            st.rerun()
+
+        TOKEN = st.session_state.user_apify_token
+        if TOKEN:
+            if st.session_state.user_token_validated:
+                st.success("Using your Apify API")
+            else:
+                st.info("API key entered. Test connection is recommended before searching.")
+                st.caption(f"Session key: {masked_token(TOKEN)}")
+        else:
+            st.warning("Enter your Apify API token to search.")
     else:
-        st.error("APIFY_API_TOKEN missing")
+        TOKEN = APP_TOKEN
+        st.success("Using app API")
+        st.caption("This token is stored in Streamlit Secrets and is never shown in the app.")
+
+    st.caption("API keys entered here are kept in Streamlit session state only. Avoid sharing screenshots that expose tokens.")
     st.caption("Country is not claimed because these search surfaces do not provide a reliable country-only filter.")
+
     if st.button("Clear cached results"):
-        st.cache_data.clear(); st.success("Cache cleared")
+        st.cache_data.clear()
+        st.success("Cache cleared")
 
 t_pop,t_now,t_niche=st.tabs(["🔥 Popular Reels","⚡ Trending Now","🎯 Niche Explorer"])
 
@@ -237,4 +328,4 @@ with t_niche:
         st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
 
 st.divider()
-st.caption("V1.3.2 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.3.3 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
