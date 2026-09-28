@@ -328,7 +328,11 @@ with st.sidebar:
 
     if st.button("Clear cached results"):
         st.cache_data.clear()
-        st.success("Cache cleared")
+        for k in list(st.session_state.keys()):
+            if k.startswith(("pop","trend","niche_v18")):
+                st.session_state.pop(k,None)
+        st.success("Cached results and saved result state cleared")
+        st.rerun()
 
 t_pop,t_now,t_niche=st.tabs(["🔥 Popular Reels","⚡ Trending Now","🎯 Niche Explorer"])
 
@@ -478,6 +482,12 @@ with t_niche:
             st.session_state.niche_v18_raw=0
 
     df=st.session_state.get("niche_v18",pd.DataFrame())
+    if not isinstance(df,pd.DataFrame):
+        try:
+            df=pd.DataFrame(df)
+        except Exception:
+            df=pd.DataFrame()
+        st.session_state.niche_v18=df
     attempted=st.session_state.get("niche_v18_attempted",False)
 
     if not df.empty:
@@ -518,4 +528,4 @@ with t_niche:
         )
 
 st.divider()
-st.caption("V1.8.1 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.8.2 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
