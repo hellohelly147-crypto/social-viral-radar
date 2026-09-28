@@ -13,7 +13,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 POPULAR_ACTOR = "apify~instagram-search-scraper"
-TREND_ACTOR = "maximedupre~instagram-reels-search-scraper"
+TREND_ACTOR = "scraping_solutions~instagram-boolean-search-scraper-posts-reels"
 BASE = "https://api.apify.com/v2/acts"
 GENERAL_TOPICS = ["travel","food","fashion","fitness","technology","AI","business","marketing","entertainment","lifestyle"]
 
@@ -66,30 +66,46 @@ def popular_search(token, query, limit):
     data=r.json(); return data if isinstance(data,list) else []
 
 @st.cache_data(ttl=900, show_spinner=False)
-def trending_search(token, terms, limit, days, min_plays):
-    # This Actor can take longer than a synchronous HTTP request. Start the run,
-    # poll its status, then fetch the default dataset when it succeeds.
+def trending_search(token, query, limit, days, min_views):
+    """
+    Discover recent public Instagram Reels using a Reel-only Boolean/keyword search.
+    The Actor applies a lower publication-date bound and can use recent hashtag feeds
+    for one-word topics. We still calculate our own Viral Score after retrieval.
+    """
     after=(datetime.now(timezone.utc)-timedelta(days=days)).date().isoformat()
-    payload={"searchTerms":terms,"maxItems":int(limit),"includeTranscripts":False,"publishedAfter":after}
-    if min_plays>0: payload["minPlays"]=int(min_plays)
+    payload={
+        "searchQuery": query.strip(),
+        "resultsLimit": int(limit),
+        "contentType": "reels_only",
+        "hashtagFeedType": "recent",
+        "searchCoverage": "efficient",
+        "oldestPostDate": after,
+        "minimumViews": int(min_views or 0),
+    }
 
     headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"}
-    start_url=f"{BASE}/{TREND_ACTOR}/runs"
-    r=requests.post(start_url,headers=headers,json=payload,timeout=30)
+    r=requests.post(f"{BASE}/{TREND_ACTOR}/runs",headers=headers,json=payload,timeout=30)
     if r.status_code>=400:
         raise RuntimeError(f"Trending run start error {r.status_code}: {r.text[:450]}")
+
     body=r.json()
     run=(body.get("data") or {}) if isinstance(body,dict) else {}
     run_id=run.get("id")
     if not run_id:
         raise RuntimeError("Apify started no usable run ID for Trending Now.")
 
-    deadline=time.time()+420  # allow up to 7 minutes for the community Actor
+    deadline=time.time()+420
     terminal={"SUCCEEDED","FAILED","TIMED-OUT","ABORTED"}
     status=run.get("status","READY")
     status_message=run.get("statusMessage") or ""
+
     while time.time()<deadline:
-        sr=requests.get(f"https://api.apify.com/v2/actor-runs/{run_id}",headers={"Authorization":f"Bearer {token}"},params={"waitForFinish":20},timeout=30)
+        sr=requests.get(
+            f"https://api.apify.com/v2/actor-runs/{run_id}",
+            headers={"Authorization":f"Bearer {token}"},
+            params={"waitForFinish":20},
+            timeout=30,
+        )
         if sr.status_code>=400:
             raise RuntimeError(f"Trending status error {sr.status_code}: {sr.text[:450]}")
         info=(sr.json().get("data") or {})
@@ -100,13 +116,20 @@ def trending_search(token, terms, limit, days, min_plays):
             break
         time.sleep(2)
     else:
-        raise RuntimeError(f"Trending run is still processing after 7 minutes (run {run_id}). Try again later; the existing Apify run may still finish.")
+        raise RuntimeError(
+            f"Trending search is still processing after 7 minutes (run {run_id}). "
+            "Do not start another duplicate run; check the existing run in Apify Console."
+        )
 
     if status!="SUCCEEDED":
         raise RuntimeError(f"Trending Actor ended with {status}: {status_message or 'No status message'}")
 
+    dataset_id=run.get("defaultDatasetId")
+    if not dataset_id:
+        raise RuntimeError("Trending run succeeded but no default dataset ID was returned.")
+
     dr=requests.get(
-        f"https://api.apify.com/v2/actor-runs/{run_id}/dataset/items",
+        f"https://api.apify.com/v2/datasets/{dataset_id}/items",
         headers={"Authorization":f"Bearer {token}"},
         params={"clean":"true","limit":int(limit)},
         timeout=60,
@@ -122,13 +145,13 @@ def normalize(items, source):
         if not isinstance(x,dict): continue
         author=x.get("author") if isinstance(x.get("author"),dict) else {}
         media=x.get("media") if isinstance(x.get("media"),dict) else {}
-        views=n(x.get("videoPlayCount") or x.get("videoViewCount") or x.get("plays") or x.get("views"))
-        likes=n(x.get("likesCount") or x.get("likes")); comments=n(x.get("commentsCount") or x.get("comments"))
-        ts=x.get("timestamp") or x.get("publishedAt") or x.get("takenAt") or x.get("takenAtIso") or x.get("date")
+        views=n(x.get("videoPlayCount") or x.get("videoViewCount") or x.get("playCount") or x.get("viewCount") or x.get("plays") or x.get("views"))
+        likes=n(x.get("likesCount") or x.get("likeCount") or x.get("likes")); comments=n(x.get("commentsCount") or x.get("commentCount") or x.get("comments"))
+        ts=x.get("timestamp") or x.get("publishedAt") or x.get("posted_at") or x.get("takenAt") or x.get("takenAtIso") or x.get("date")
         age=hours_old(ts); velocity=round(views/max(age,1)); score=score_reel(views,likes,comments,age)
         rows.append({
-            "signal":signal(score,age,velocity),"creator":x.get("ownerUsername") or author.get("username") or x.get("username") or "Unknown",
-            "caption":(x.get("caption") or "")[:650],"age_hours":age,"views":views,"likes":likes,"comments":comments,
+            "signal":signal(score,age,velocity),"creator":x.get("ownerUsername") or author.get("username") or x.get("author_username") or x.get("username") or "Unknown",
+            "caption":(x.get("caption") or x.get("text") or "")[:650],"age_hours":age,"views":views,"likes":likes,"comments":comments,
             "engagement":round(100*(likes+comments)/max(views,1),2),"velocity":velocity,"score":score,
             "url":x.get("url") or x.get("permalink") or "","thumbnail":x.get("displayUrl") or x.get("thumbnailUrl") or media.get("thumbnailUrl") or "",
             "source":source,"timestamp":ts or ""
@@ -149,7 +172,7 @@ def compact(v):
 def render(df, attempted=False):
     if df.empty:
         if attempted:
-            st.info("No matching Reels returned. Try a broader keyword, a longer freshness window, or a lower minimum views threshold.")
+            st.info("No matching Reels returned. Try a broader keyword, a longer freshness window, or a lower minimum views threshold. Instagram discovery is bounded, so zero results does not prove that no such Reels exist.")
         else:
             st.caption("Run a search to load live Reel data.")
         return
@@ -281,15 +304,16 @@ with t_pop:
 
 with t_now:
     st.subheader("Trending Now")
-    st.caption("Searches the currently ranked public Reels surface and applies a publication-date filter. This is the tab to use for fresh/rising content.")
+    st.caption("Discovers public Reels by keyword/hashtag, applies a recent-post date filter, then ranks results by velocity, engagement and freshness.")
     c1,c2,c3=st.columns([2,1,1])
     trend_q=c1.text_input("Topic / keyword",value="travel",key="trend_q")
     days=c2.selectbox("Freshness",[1,3,7,14,30],index=2,format_func=lambda x:f"Last {x} day" if x==1 else f"Last {x} days")
     min_views=c3.selectbox("Min views",[0,1000,10000,50000,100000,500000],index=2,format_func=lambda x:"Any" if x==0 else compact(x))
+    st.caption("Tip: start with 10 results + Efficient search. This discovery source may charge for successful search pages even when filters reject all candidates.")
     if st.button("Find fresh trending Reels",type="primary",disabled=(not TOKEN or not trend_q.strip()),key="trend_btn"):
         try:
-            with st.spinner("Scanning fresh Reels…"):
-                raw = trending_search(TOKEN,[trend_q.strip()],limit,days,min_views)
+            with st.spinner("Searching recent public Reels… This can take a few minutes."):
+                raw = trending_search(TOKEN,trend_q.strip(),limit,days,min_views)
                 st.session_state.trend_raw_count = len(raw)
                 st.session_state.trend=normalize(raw,"Trending Now")
                 st.session_state.trend_attempted=True
@@ -314,7 +338,7 @@ with t_niche:
     if st.button("Search niche",type="primary",disabled=(not TOKEN or not niche.strip()),key="niche_btn"):
         try:
             with st.spinner(f"Searching '{niche}'…"):
-                if mode=="Trending Now": raw=trending_search(TOKEN,[niche.strip()],limit,ndays,0); src="Trending Now"
+                if mode=="Trending Now": raw=trending_search(TOKEN,niche.strip(),limit,ndays,0); src="Trending Now"
                 else: raw=popular_search(TOKEN,niche.strip(),limit); src="Popular"
                 st.session_state.niche_raw_count = len(raw)
                 st.session_state.niche_df=normalize(raw,src)
@@ -328,4 +352,4 @@ with t_niche:
         st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
 
 st.divider()
-st.caption("V1.3.3 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.4 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
