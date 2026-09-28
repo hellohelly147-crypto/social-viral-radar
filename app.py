@@ -14,6 +14,7 @@ st.markdown("""
 
 POPULAR_ACTOR = "apify~instagram-search-scraper"
 TREND_ACTOR = "scraping_solutions~instagram-boolean-search-scraper-posts-reels"
+PROFILE_ACTOR = "apify~instagram-profile-scraper"
 BASE = "https://api.apify.com/v2/acts"
 GENERAL_TOPICS = ["travel","food","fashion","fitness","technology","AI","business","marketing","entertainment","lifestyle"]
 
@@ -190,6 +191,85 @@ def render(df, attempted=False):
     st.dataframe(out[["signal","creator","caption","Age","Views","Likes","Comments","Views/hr","Engagement","Score","url"]],use_container_width=True,hide_index=True,
         column_config={"signal":"Signal","creator":"Creator","caption":"Content","url":st.column_config.LinkColumn("Instagram")})
 
+
+
+def actor_dataset(token, actor_id, payload, label="Actor", timeout_seconds=420):
+    headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"}
+    r=requests.post(f"{BASE}/{actor_id}/runs",headers=headers,json=payload,timeout=30)
+    if r.status_code>=400:
+        raise RuntimeError(f"{label} start error {r.status_code}: {r.text[:450]}")
+    run=(r.json().get("data") or {})
+    run_id=run.get("id")
+    if not run_id:
+        raise RuntimeError(f"{label} returned no run ID.")
+    deadline=time.time()+timeout_seconds
+    while time.time()<deadline:
+        sr=requests.get(
+            f"https://api.apify.com/v2/actor-runs/{run_id}",
+            headers={"Authorization":f"Bearer {token}"},
+            params={"waitForFinish":20},timeout=30
+        )
+        if sr.status_code>=400:
+            raise RuntimeError(f"{label} status error {sr.status_code}: {sr.text[:450]}")
+        info=(sr.json().get("data") or {})
+        status=info.get("status")
+        if status in {"SUCCEEDED","FAILED","TIMED-OUT","ABORTED"}:
+            if status!="SUCCEEDED":
+                raise RuntimeError(f"{label} ended with {status}: {info.get('statusMessage','')}")
+            ds=info.get("defaultDatasetId")
+            if not ds: return []
+            dr=requests.get(
+                f"https://api.apify.com/v2/datasets/{ds}/items",
+                headers={"Authorization":f"Bearer {token}"},
+                params={"clean":"true","format":"json"},timeout=60
+            )
+            if dr.status_code>=400:
+                raise RuntimeError(f"{label} dataset error {dr.status_code}: {dr.text[:450]}")
+            return dr.json() if isinstance(dr.json(),list) else []
+        time.sleep(2)
+    raise RuntimeError(f"{label} is still processing after {timeout_seconds//60} minutes.")
+
+def _country_strings(obj, path=""):
+    """Find country-like values without assuming one fixed Apify output schema."""
+    found=[]
+    if isinstance(obj,dict):
+        for k,v in obj.items():
+            p=f"{path}.{k}" if path else k
+            lk=k.lower()
+            if "country" in lk and isinstance(v,(str,int,float)):
+                found.append((p,str(v)))
+            found.extend(_country_strings(v,p))
+    elif isinstance(obj,list):
+        for i,v in enumerate(obj):
+            found.extend(_country_strings(v,f"{path}[{i}]"))
+    return found
+
+def verify_india_creators(token, creators):
+    creators=[str(x).strip().lstrip("@") for x in creators if str(x).strip() and str(x)!="Unknown"]
+    creators=list(dict.fromkeys(creators))
+    if not creators: return {}, []
+    profiles=actor_dataset(
+        token, PROFILE_ACTOR,
+        {"usernames":creators,"includeAboutSection":True},
+        label="India profile verification"
+    )
+    verdict={}
+    evidence=[]
+    for p in profiles:
+        username=(p.get("username") or p.get("userName") or p.get("input") or "").strip().lstrip("@")
+        pairs=_country_strings(p)
+        india_hits=[(k,v) for k,v in pairs if v.strip().lower() in {"india","in","ind"} or "india" in v.lower()]
+        other=[(k,v) for k,v in pairs if v.strip()]
+        is_india=bool(india_hits)
+        if username:
+            verdict[username.lower()]=is_india
+            evidence.append({
+                "creator":username,
+                "india_verified":is_india,
+                "geo_evidence":"; ".join([f"{k}: {v}" for k,v in india_hits]) if india_hits else
+                               ("Country metadata present but not India" if other else "Country of origin unavailable")
+            })
+    return verdict, evidence
 
 def niche_benchmark(df):
     """Benchmark each Reel against only the returned niche sample."""
@@ -403,8 +483,8 @@ with t_now:
         st.caption(f"API records received: {st.session_state.get('trend_raw_count', 0)}")
 
 with t_niche:
-    st.subheader("Niche Content Intelligence")
-    st.caption("Find both viral and non-viral content in a specific industry/niche. Performance is judged relative to the returned niche sample—not by one global view threshold.")
+    st.subheader("🇮🇳 India Viral Niche Radar")
+    st.caption("India-only mode: candidate Reels are discovered by niche, then creator country-of-origin is checked. Only creators whose available account metadata explicitly verifies India are kept.")
 
     industries={
         "Industrial / Manufacturing":["Industrial Valves","Pneumatics","Valve Automation","Process Automation","Industrial Pumps","Cleanroom Equipment","Packaging Machinery","Custom niche"],
@@ -417,59 +497,104 @@ with t_niche:
         "Custom industry":["Custom niche"]
     }
 
-    c1,c2=st.columns(2)
-    industry=c1.selectbox("Industry",list(industries),key="industry_v16")
-    niche_pick=c2.selectbox("Specific niche",industries[industry],key="niche_pick_v16")
-    custom_industry=st.text_input("Custom industry",placeholder="e.g. Real Estate",key="custom_ind_v16") if industry=="Custom industry" else ""
-    custom_niche=st.text_input("Custom niche",placeholder="e.g. Pneumatic actuated ball valves",key="custom_niche_v16") if niche_pick=="Custom niche" else ""
+    c1,c2,c3=st.columns([1.2,1.2,.7])
+    industry=c1.selectbox("Industry",list(industries),key="industry_v17")
+    niche_pick=c2.selectbox("Specific niche",industries[industry],key="niche_v17")
+    c3.text_input("Country",value="India 🇮🇳",disabled=True,key="country_v17")
+
+    custom_industry=st.text_input("Custom industry",placeholder="e.g. Real Estate",key="custom_ind_v17") if industry=="Custom industry" else ""
+    custom_niche=st.text_input("Custom niche",placeholder="e.g. Pneumatic actuated ball valves",key="custom_niche_v17") if niche_pick=="Custom niche" else ""
     chosen_industry=(custom_industry or industry).strip()
     chosen_niche=(custom_niche or niche_pick).strip()
 
-    q1,q2,q3=st.columns([1.6,1,1])
-    extras=q1.text_input("Extra keywords (optional)",placeholder="e.g. actuator, automation, ball valve",key="extras_v16")
-    days=q2.selectbox("Freshness",[7,14,30],index=1,format_func=lambda x:f"Last {x} days",key="days_v16")
-    minv=q3.selectbox("Min views",[0,500,1000,5000,10000],index=0,format_func=lambda x:"Any" if x==0 else compact(x),key="minv_v16")
-    st.caption("Keep Min views = Any if you want viral + normal + low-performing content. A higher minimum removes weak posts before benchmarking.")
+    q1,q2,q3=st.columns([1.5,1,1])
+    extras=q1.text_input("Extra keywords (optional)",placeholder="e.g. actuator, ball valve",key="extras_v17")
+    days=q2.selectbox("Freshness",[7,14,30],index=1,format_func=lambda x:f"Last {x} days",key="days_v17")
+    candidate_pool=q3.selectbox("Candidate pool",[30,50,80],index=0,key="pool_v17",
+        help="More candidates can find more verified India results, but uses more Apify resources.")
 
-    if st.button("Scan niche content",type="primary",disabled=(not TOKEN or not chosen_niche),key="scan_v16"):
+    st.info("Strict verification intentionally drops creators whose country-of-origin is unavailable. So final India results can be fewer than the requested Results count.")
+
+    if st.button("Find India viral content",type="primary",disabled=(not TOKEN or not chosen_niche),key="scan_v17"):
         terms=[chosen_niche]
-        if chosen_industry and chosen_industry!="Custom industry" and chosen_industry.lower() not in chosen_niche.lower():
-            terms.append(chosen_industry)
         if extras.strip():
             terms += [x.strip() for x in extras.split(",") if x.strip()][:4]
-        query=" OR ".join(dict.fromkeys(terms))
+        # India terms help candidate discovery, but DO NOT count as verification.
+        query=" OR ".join(dict.fromkeys(terms + ["India"]))
         try:
-            with st.spinner("Scanning recent niche content… This may take a few minutes."):
-                raw=trending_search(TOKEN,query,limit,days,minv)
-            df=normalize(raw,"Niche")
-            if not df.empty: df=niche_benchmark(df)
-            st.session_state.niche_v16=df
-            st.session_state.niche_v16_raw=len(raw)
-            st.session_state.niche_v16_attempted=True
-            st.session_state.niche_v16_query=query
+            with st.spinner("1/2 Discovering recent niche Reels…"):
+                raw=trending_search(TOKEN,query,candidate_pool,days,0)
+            candidate_df=normalize(raw,"India Candidate")
+            if candidate_df.empty:
+                st.session_state.india_v17=pd.DataFrame()
+                st.session_state.india_v17_stats={"candidates":0,"verified":0}
+            else:
+                with st.spinner("2/2 Verifying creator country-of-origin as India…"):
+                    verdict,evidence=verify_india_creators(TOKEN,candidate_df.creator.tolist())
+                candidate_df["india_verified"]=candidate_df.creator.str.lower().map(verdict).fillna(False)
+                india_df=candidate_df[candidate_df.india_verified].copy()
+                if not india_df.empty:
+                    india_df=niche_benchmark(india_df)
+                    # Viral-only output: keep strong relative momentum; if sample is tiny,
+                    # use the existing momentum score as a conservative fallback.
+                    if len(india_df)>=5:
+                        india_df=india_df[india_df.performance.isin(["🔥 Viral / Breakout","⚡ Rising"])].copy()
+                    else:
+                        india_df=india_df[india_df.score>=58].copy()
+                    india_df=india_df.sort_values(["score","velocity"],ascending=False).head(limit)
+                st.session_state.india_v17=india_df
+                st.session_state.india_v17_evidence=pd.DataFrame(evidence)
+                st.session_state.india_v17_stats={
+                    "candidates":len(candidate_df),
+                    "verified":int(candidate_df.india_verified.sum()),
+                    "viral":len(india_df)
+                }
+            st.session_state.india_v17_attempted=True
+            st.session_state.india_v17_query=query
         except Exception as e:
             st.error(str(e))
-            st.session_state.niche_v16=pd.DataFrame()
-            st.session_state.niche_v16_attempted=True
+            st.session_state.india_v17=pd.DataFrame()
+            st.session_state.india_v17_attempted=True
 
-    df=st.session_state.get("niche_v16",pd.DataFrame())
-    attempted=st.session_state.get("niche_v16_attempted",False)
-    if not df.empty:
-        m1,m2,m3,m4=st.columns(4)
-        m1.metric("🔥 Viral / Breakout",int((df.performance=="🔥 Viral / Breakout").sum()))
-        m2.metric("⚡ Rising",int((df.performance=="⚡ Rising").sum()))
-        m3.metric("🟢 Normal",int((df.performance=="🟢 Normal").sum()))
-        m4.metric("🔴 Low Performing",int((df.performance=="🔴 Low Performing").sum()))
-        st.caption(f"Sample: {len(df)} Reels · Median velocity: {compact(df.velocity.median())} views/hr · Median engagement: {df.engagement.median():.2f}%")
-        cats=st.multiselect("Show performance",["🔥 Viral / Breakout","⚡ Rising","🟢 Normal","🔴 Low Performing"],
-            default=["🔥 Viral / Breakout","⚡ Rising","🟢 Normal","🔴 Low Performing"],key="cats_v16")
-        shown=df[df.performance.isin(cats)] if cats else df.iloc[0:0]
-        render_niche(shown,attempted)
-    else:
-        render_niche(df,attempted)
+    df=st.session_state.get("india_v17",pd.DataFrame())
+    attempted=st.session_state.get("india_v17_attempted",False)
+    stats=st.session_state.get("india_v17_stats",{})
 
     if attempted:
-        st.caption(f"API records received: {st.session_state.get('niche_v16_raw',0)} · Query: {st.session_state.get('niche_v16_query','—')}")
+        m1,m2,m3=st.columns(3)
+        m1.metric("Candidates scanned",stats.get("candidates",0))
+        m2.metric("🇮🇳 India verified",stats.get("verified",0))
+        m3.metric("🔥 Viral / Rising shown",stats.get("viral",0))
+
+        if not df.empty:
+            show=df.copy()
+            show["India Match"]="🇮🇳 Verified"
+            show["Age"]=show.age_hours.map(lambda h:f"{h}h" if h<48 else f"{h/24:.0f}d")
+            show["Views"]=show.views.map(compact)
+            show["Likes"]=show.likes.map(compact)
+            show["Comments"]=show.comments.map(compact)
+            show["Views/hr"]=show.velocity.map(compact)
+            show["Engagement"]=show.engagement.map(lambda x:f"{x:.2f}%")
+            show["Momentum Score"]=show.score.map(lambda x:f"{x:.1f}")
+            st.dataframe(
+                show[["India Match","creator","caption","Age","Views","Likes","Comments","Views/hr","Engagement","Momentum Score","url"]],
+                use_container_width=True,hide_index=True,
+                column_config={
+                    "creator":"Creator","caption":"Content",
+                    "url":st.column_config.LinkColumn("Instagram",display_text="Open Reel")
+                }
+            )
+        else:
+            st.warning("No strictly India-verified viral/rising Reels survived this scan. This does not mean none exist; Instagram does not expose country-of-origin for every creator. Try a larger candidate pool, longer freshness window, or broader niche.")
+
+        with st.expander("India verification details"):
+            ev=st.session_state.get("india_v17_evidence",pd.DataFrame())
+            if not ev.empty:
+                st.dataframe(ev,use_container_width=True,hide_index=True)
+            else:
+                st.caption("No profile verification records available.")
+
+        st.caption(f"Discovery query: {st.session_state.get('india_v17_query','—')} · India is confirmed from creator account country metadata, not merely from the word 'India' in the search query.")
 
 st.divider()
-st.caption("V1.6 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.7 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
