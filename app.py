@@ -329,7 +329,7 @@ with st.sidebar:
     if st.button("Clear cached results"):
         st.cache_data.clear()
         for k in list(st.session_state.keys()):
-            if k.startswith(("pop","trend","niche_v18")):
+            if k.startswith(("pop","trend","niche_v18","niche_results_v18")):
                 st.session_state.pop(k,None)
         st.success("Cached results and saved result state cleared")
         st.rerun()
@@ -470,24 +470,24 @@ with t_niche:
             if not df.empty:
                 df=niche_benchmark(df)
 
-            st.session_state.niche_v18=df
+            st.session_state.niche_results_v18=df
             st.session_state.niche_v18_attempted=True
             st.session_state.niche_v18_raw=len(raw)
             st.session_state.niche_v18_query=query
             st.session_state.niche_v18_market=market
         except Exception as e:
             st.error(str(e))
-            st.session_state.niche_v18=pd.DataFrame()
+            st.session_state.niche_results_v18=pd.DataFrame()
             st.session_state.niche_v18_attempted=True
             st.session_state.niche_v18_raw=0
 
-    df=st.session_state.get("niche_v18",pd.DataFrame())
+    df=st.session_state.get("niche_results_v18",pd.DataFrame())
     if not isinstance(df,pd.DataFrame):
         try:
             df=pd.DataFrame(df)
         except Exception:
             df=pd.DataFrame()
-        st.session_state.niche_v18=df
+        st.session_state.niche_results_v18=df
     attempted=st.session_state.get("niche_v18_attempted",False)
 
     if not df.empty:
@@ -528,4 +528,4 @@ with t_niche:
         )
 
 st.divider()
-st.caption("V1.8.2 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.8.3 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
