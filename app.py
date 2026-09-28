@@ -290,6 +290,13 @@ with st.sidebar:
             help="The token is used for Apify requests in this session and is not written to GitHub or app files.",
         ).strip()
 
+        st.markdown("**Need an Apify API token?**")
+        st.markdown(
+            "[Create free Apify account](https://console.apify.com/sign-up) · "
+            "[Get / manage API token](https://console.apify.com/account#/integrations)"
+        )
+        st.caption("After signing in, open Settings → API & Integrations and copy your token here.")
+
         if entered_token != st.session_state.user_apify_token:
             st.session_state.user_apify_token = entered_token
             st.session_state.user_token_validated = False
@@ -528,4 +535,4 @@ with t_niche:
         )
 
 st.divider()
-st.caption("V1.8.3 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.9 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
