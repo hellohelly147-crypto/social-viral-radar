@@ -190,6 +190,47 @@ def render(df, attempted=False):
     st.dataframe(out[["signal","creator","caption","Age","Views","Likes","Comments","Views/hr","Engagement","Score","url"]],use_container_width=True,hide_index=True,
         column_config={"signal":"Signal","creator":"Creator","caption":"Content","url":st.column_config.LinkColumn("Instagram")})
 
+
+def niche_benchmark(df):
+    """Benchmark each Reel against only the returned niche sample."""
+    if df.empty:
+        return df
+    d=df.copy()
+    med_v=max(float(d.velocity.median()),1.0)
+    med_e=max(float(d.engagement.median()),0.01)
+    med_views=max(float(d.views.median()),1.0)
+
+    d["peer_velocity_x"]=(d.velocity/med_v).round(2)
+    d["velocity_pct"]=d.velocity.rank(pct=True,method="average")*100
+    d["engagement_pct"]=d.engagement.rank(pct=True,method="average")*100
+    d["views_pct"]=d.views.rank(pct=True,method="average")*100
+    d["niche_score"]=(0.55*d.velocity_pct+0.30*d.engagement_pct+0.15*d.views_pct).round(1)
+
+    def bucket(r):
+        if r.niche_score>=82 and r.peer_velocity_x>=1.8: return "🔥 Viral / Breakout"
+        if r.niche_score>=65 and r.peer_velocity_x>=1.15: return "⚡ Rising"
+        if r.niche_score<35 and r.peer_velocity_x<0.75: return "🔴 Low Performing"
+        return "🟢 Normal"
+    d["performance"]=d.apply(bucket,axis=1)
+    return d.sort_values(["niche_score","velocity"],ascending=False)
+
+def render_niche(df, attempted=False):
+    if df.empty:
+        if attempted: st.info("No matching niche content returned. Try a broader niche phrase or a longer freshness window.")
+        else: st.caption("Run a niche scan to load recent public Reel data.")
+        return
+    out=df.copy()
+    out["Age"]=out.age_hours.map(lambda h:f"{h}h" if h<48 else f"{h/24:.0f}d")
+    out["Views"]=out.views.map(compact); out["Likes"]=out.likes.map(compact); out["Comments"]=out.comments.map(compact)
+    out["Views/hr"]=out.velocity.map(compact); out["Engagement"]=out.engagement.map(lambda x:f"{x:.2f}%")
+    out["vs Niche"]=out.peer_velocity_x.map(lambda x:f"{x:.1f}×")
+    out["Niche Score"]=out.niche_score.map(lambda x:f"{x:.1f}")
+    st.dataframe(
+        out[["performance","creator","caption","Age","Views","Likes","Comments","Views/hr","Engagement","vs Niche","Niche Score","url"]],
+        use_container_width=True,hide_index=True,
+        column_config={"performance":"Performance","creator":"Creator","caption":"Content","url":st.column_config.LinkColumn("Instagram")}
+    )
+
 APP_TOKEN = secret("APIFY_API_TOKEN")
 
 def masked_token(token):
@@ -362,27 +403,73 @@ with t_now:
         st.caption(f"API records received: {st.session_state.get('trend_raw_count', 0)}")
 
 with t_niche:
-    st.subheader("Niche Explorer")
-    st.caption("Compare proven popularity with recent momentum for a specific niche.")
-    niche=st.text_input("Keyword / niche",placeholder="e.g. digital marketing, industrial valves, gujarati food",key="niche")
-    mode=st.radio("Discovery mode",["Trending Now","Popular"],horizontal=True)
-    if mode=="Trending Now":
-        ndays=st.selectbox("Published within",[3,7,14,30],index=1,key="ndays")
-    if st.button("Search niche",type="primary",disabled=(not TOKEN or not niche.strip()),key="niche_btn"):
+    st.subheader("Niche Content Intelligence")
+    st.caption("Find both viral and non-viral content in a specific industry/niche. Performance is judged relative to the returned niche sample—not by one global view threshold.")
+
+    industries={
+        "Industrial / Manufacturing":["Industrial Valves","Pneumatics","Valve Automation","Process Automation","Industrial Pumps","Cleanroom Equipment","Packaging Machinery","Custom niche"],
+        "Digital Marketing":["SEO","Technical SEO","Google Ads","Meta Ads","Social Media Marketing","Content Marketing","Local SEO","Ecommerce Marketing","Custom niche"],
+        "Travel & Hospitality":["Family Travel","Luxury Travel","Budget Travel","Hotels & Resorts","Honeymoon Travel","International Travel","Holiday Membership","Custom niche"],
+        "Fashion & Apparel":["Menswear","Womenswear","T-Shirts","Ethnic Wear","Streetwear","Fashion Accessories","Custom niche"],
+        "Healthcare & Aesthetics":["Laser Hair Removal","Skin Care","Medical Aesthetics","Dental","Wellness","Clinics","Custom niche"],
+        "Food & Ingredients":["Food Ingredients","Dehydrated Onion","Dehydrated Garlic","Chicory","Food Manufacturing","B2B Food Supply","Custom niche"],
+        "3D Printing":["3D Printed Gifts","Personalized Keychains","3D Printed Lamps","NFC Products","Bambu Lab","Custom 3D Prints","Custom niche"],
+        "Custom industry":["Custom niche"]
+    }
+
+    c1,c2=st.columns(2)
+    industry=c1.selectbox("Industry",list(industries),key="industry_v16")
+    niche_pick=c2.selectbox("Specific niche",industries[industry],key="niche_pick_v16")
+    custom_industry=st.text_input("Custom industry",placeholder="e.g. Real Estate",key="custom_ind_v16") if industry=="Custom industry" else ""
+    custom_niche=st.text_input("Custom niche",placeholder="e.g. Pneumatic actuated ball valves",key="custom_niche_v16") if niche_pick=="Custom niche" else ""
+    chosen_industry=(custom_industry or industry).strip()
+    chosen_niche=(custom_niche or niche_pick).strip()
+
+    q1,q2,q3=st.columns([1.6,1,1])
+    extras=q1.text_input("Extra keywords (optional)",placeholder="e.g. actuator, automation, ball valve",key="extras_v16")
+    days=q2.selectbox("Freshness",[7,14,30],index=1,format_func=lambda x:f"Last {x} days",key="days_v16")
+    minv=q3.selectbox("Min views",[0,500,1000,5000,10000],index=0,format_func=lambda x:"Any" if x==0 else compact(x),key="minv_v16")
+    st.caption("Keep Min views = Any if you want viral + normal + low-performing content. A higher minimum removes weak posts before benchmarking.")
+
+    if st.button("Scan niche content",type="primary",disabled=(not TOKEN or not chosen_niche),key="scan_v16"):
+        terms=[chosen_niche]
+        if chosen_industry and chosen_industry!="Custom industry" and chosen_industry.lower() not in chosen_niche.lower():
+            terms.append(chosen_industry)
+        if extras.strip():
+            terms += [x.strip() for x in extras.split(",") if x.strip()][:4]
+        query=" OR ".join(dict.fromkeys(terms))
         try:
-            with st.spinner(f"Searching '{niche}'…"):
-                if mode=="Trending Now": raw=trending_search(TOKEN,niche.strip(),limit,ndays,0); src="Trending Now"
-                else: raw=popular_search(TOKEN,niche.strip(),limit); src="Popular"
-                st.session_state.niche_raw_count = len(raw)
-                st.session_state.niche_df=normalize(raw,src)
-                st.session_state.niche_attempted=True
-        except Exception as e: st.error(str(e))
-    df=st.session_state.get("niche_df",pd.DataFrame())
+            with st.spinner("Scanning recent niche content… This may take a few minutes."):
+                raw=trending_search(TOKEN,query,limit,days,minv)
+            df=normalize(raw,"Niche")
+            if not df.empty: df=niche_benchmark(df)
+            st.session_state.niche_v16=df
+            st.session_state.niche_v16_raw=len(raw)
+            st.session_state.niche_v16_attempted=True
+            st.session_state.niche_v16_query=query
+        except Exception as e:
+            st.error(str(e))
+            st.session_state.niche_v16=pd.DataFrame()
+            st.session_state.niche_v16_attempted=True
+
+    df=st.session_state.get("niche_v16",pd.DataFrame())
+    attempted=st.session_state.get("niche_v16_attempted",False)
     if not df.empty:
-        a,b,c=st.columns(3); a.metric("Matching Reels",len(df)); b.metric("Total Views",compact(df.views.sum())); c.metric("Best Score",f"{df.score.max():.1f}")
-    render(df, st.session_state.get("niche_attempted", False))
-    if st.session_state.get("niche_attempted", False):
-        st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
+        m1,m2,m3,m4=st.columns(4)
+        m1.metric("🔥 Viral / Breakout",int((df.performance=="🔥 Viral / Breakout").sum()))
+        m2.metric("⚡ Rising",int((df.performance=="⚡ Rising").sum()))
+        m3.metric("🟢 Normal",int((df.performance=="🟢 Normal").sum()))
+        m4.metric("🔴 Low Performing",int((df.performance=="🔴 Low Performing").sum()))
+        st.caption(f"Sample: {len(df)} Reels · Median velocity: {compact(df.velocity.median())} views/hr · Median engagement: {df.engagement.median():.2f}%")
+        cats=st.multiselect("Show performance",["🔥 Viral / Breakout","⚡ Rising","🟢 Normal","🔴 Low Performing"],
+            default=["🔥 Viral / Breakout","⚡ Rising","🟢 Normal","🔴 Low Performing"],key="cats_v16")
+        shown=df[df.performance.isin(cats)] if cats else df.iloc[0:0]
+        render_niche(shown,attempted)
+    else:
+        render_niche(df,attempted)
+
+    if attempted:
+        st.caption(f"API records received: {st.session_state.get('niche_v16_raw',0)} · Query: {st.session_state.get('niche_v16_query','—')}")
 
 st.divider()
-st.caption("V1.5 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.6 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
