@@ -461,6 +461,8 @@ with t_niche:
             with st.spinner("Scanning recent niche content… This may take a few minutes."):
                 raw=trending_search(TOKEN,query,limit,days,minv)
             df=normalize(raw,"Niche")
+            if not isinstance(df, pd.DataFrame):
+                df=pd.DataFrame(df)
             if not df.empty:
                 df=niche_benchmark(df)
 
@@ -516,4 +518,4 @@ with t_niche:
         )
 
 st.divider()
-st.caption("V1.8 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.8.1 • Popular, Trending Now and Niche Intelligence are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
