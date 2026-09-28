@@ -44,16 +44,24 @@ def score_reel(views, likes, comments, age_h):
     views=max(views,1); age_h=max(age_h,1)
     velocity=views/age_h
     engagement=(likes+2*comments)/views
-    # Freshness intentionally decays quickly: ~1 at new, 0 at 30 days.
-    freshness=max(0, 1-age_h/720)
+
+    # V1.5: stronger "now" weighting. Freshness halves roughly every 30 hours,
+    # so an older mega-hit needs exceptional current velocity to stay on top.
+    freshness=0.5**(age_h/30.0)
     velocity_component=min(1, math.log10(max(velocity,1))/5.3)
     engagement_component=min(1, engagement/0.10)
-    return round(min(99,100*(0.48*velocity_component+0.30*engagement_component+0.22*freshness)),1)
+    popularity_component=min(1, math.log10(max(views,1))/8.0)
+
+    return round(min(99,100*(
+        0.42*velocity_component +
+        0.18*engagement_component +
+        0.32*freshness +
+        0.08*popularity_component
+    )),1)
 
 def signal(score, age_h, velocity):
-    if age_h <= 72 and score >= 72: return "🚀 Rising"
-    if age_h <= 168 and score >= 62: return "⚡ Trending"
-    if score >= 75: return "🔥 Viral"
+    if age_h <= 24 and (score >= 72 or velocity >= 10000): return "🔥 Breakout"
+    if age_h <= 72 and (score >= 58 or velocity >= 2000): return "⚡ Rising"
     if age_h <= 168: return "✨ Fresh"
     return "Popular"
 
@@ -304,12 +312,18 @@ with t_pop:
 
 with t_now:
     st.subheader("Trending Now")
-    st.caption("Discovers public Reels by keyword/hashtag, applies a recent-post date filter, then ranks results by velocity, engagement and freshness.")
+    st.caption("Discovers recent public Reels and ranks current momentum. V1.5 gives stronger weight to freshness + views/hour so older mega-hits do not automatically dominate Trending Now.")
+    st.caption("Signals: 🔥 Breakout = very recent + fast velocity · ⚡ Rising = recent momentum · ✨ Fresh = recent discovery")
     c1,c2,c3=st.columns([2,1,1])
     trend_q=c1.text_input("Topic / keyword",value="travel",key="trend_q")
     days=c2.selectbox("Freshness",[1,3,7,14,30],index=2,format_func=lambda x:f"Last {x} day" if x==1 else f"Last {x} days")
     min_views=c3.selectbox("Min views",[0,1000,10000,50000,100000,500000],index=2,format_func=lambda x:"Any" if x==0 else compact(x))
-    st.caption("Tip: start with 10 results + Efficient search. This discovery source may charge for successful search pages even when filters reject all candidates.")
+    f1,f2=st.columns(2)
+    age_filter=f1.selectbox("Show age",["All returned","≤ 24 hours","≤ 48 hours","≤ 72 hours"],index=0,
+        help="Client-side filter. Changing this does not start another Apify run.")
+    sort_mode=f2.selectbox("Rank by",["Trending Score","Views / hour","Newest first","Engagement"],index=0,
+        help="Client-side ranking. Changing this does not start another Apify run.")
+    st.caption("Tip: start with 10 results + Efficient search. Age/ranking controls are client-side, so changing them does not consume another Apify run.")
     if st.button("Find fresh trending Reels",type="primary",disabled=(not TOKEN or not trend_q.strip()),key="trend_btn"):
         try:
             with st.spinner("Searching recent public Reels… This can take a few minutes."):
@@ -322,9 +336,28 @@ with t_now:
             st.session_state.trend=pd.DataFrame()
             st.error(str(e))
     df=st.session_state.get("trend",pd.DataFrame())
-    if not df.empty:
-        a,b,c,d=st.columns(4); a.metric("Fresh Reels",len(df)); b.metric("Rising/Trending",int(df.signal.isin(["🚀 Rising","⚡ Trending"]).sum())); c.metric("Best Score",f"{df.score.max():.1f}"); d.metric("Top Views/hr",compact(df.velocity.max()))
-    render(df, st.session_state.get("trend_attempted", False))
+    display_df=df.copy()
+    if not display_df.empty:
+        age_limits={"≤ 24 hours":24,"≤ 48 hours":48,"≤ 72 hours":72}
+        if age_filter in age_limits:
+            display_df=display_df[display_df.age_hours<=age_limits[age_filter]]
+
+        if sort_mode=="Views / hour":
+            display_df=display_df.sort_values(["velocity","score"],ascending=False)
+        elif sort_mode=="Newest first":
+            display_df=display_df.sort_values(["age_hours","score"],ascending=[True,False])
+        elif sort_mode=="Engagement":
+            display_df=display_df.sort_values(["engagement","score"],ascending=False)
+        else:
+            display_df=display_df.sort_values(["score","velocity"],ascending=False)
+
+        a,b,c,d=st.columns(4)
+        a.metric("Reels shown",len(display_df))
+        b.metric("Breakout / Rising",int(display_df.signal.isin(["🔥 Breakout","⚡ Rising"]).sum()))
+        c.metric("Best Score",f"{display_df.score.max():.1f}" if not display_df.empty else "—")
+        d.metric("Top Views/hr",compact(display_df.velocity.max()) if not display_df.empty else "—")
+
+    render(display_df, st.session_state.get("trend_attempted", False))
     if st.session_state.get("trend_attempted", False):
         st.caption(f"API records received: {st.session_state.get('trend_raw_count', 0)}")
 
@@ -352,4 +385,4 @@ with t_niche:
         st.caption(f"API records received: {st.session_state.get('niche_raw_count', 0)}")
 
 st.divider()
-st.caption("V1.4 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
+st.caption("V1.5 • Popular and Trending Now are intentionally separate. Viral Score is an internal heuristic based on view velocity, engagement and freshness; it is not an Instagram-provided metric.")
